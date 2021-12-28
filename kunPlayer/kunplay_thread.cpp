@@ -422,7 +422,26 @@ static double get_audio_clock(VideoState *is)
     //要留意 is->audio_clock 的赋值地方
 }
 
-
+//这个是音视频同步操作，
+static double synchronize_video(VideoState *is,AVFrame *src_frame, double pts)
+{
+    double frame_delay;
+    if(pts!=0){//若送进来的pts不为空则大结构体的video_clock为pts
+        is->video_clock=pts;
+    }else{ //反则反
+        pts=is->video_clock;
+    }//
+    //根据时间基去转换成秒
+    frame_delay = av_q2d(is->video_st->codec->time_base);
+    /*
+        当解码时，这个信号告诉你这张图片需要要延迟多少久。
+        需要求出扩展延时：
+        extra_delay = repeat_pict / (2*fps)
+     */
+    frame_delay += src_frame->repeat_pict * (frame_delay*0.5);
+    is->video_clock += frame_delay;
+    return pts;
+}
 
 
 
