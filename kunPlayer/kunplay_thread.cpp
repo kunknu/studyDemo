@@ -431,41 +431,383 @@ static double synchronize_video(VideoState *is,AVFrame *src_frame, double pts)
     }else{ //反则反
         pts=is->video_clock;
     }//
-    //根据时间基去转换成秒
+    //根据时间基去转换成秒，时间基时间，还要加上延迟时间才算正确时间
     frame_delay = av_q2d(is->video_st->codec->time_base);
     /*
         当解码时，这个信号告诉你这张图片需要要延迟多少久。
         需要求出扩展延时：
         extra_delay = repeat_pict / (2*fps)
      */
+    //正确的时间
     frame_delay += src_frame->repeat_pict * (frame_delay*0.5);
+    //这个大结构体里的时间是0吗？为什么不=而用+=？
     is->video_clock += frame_delay;
     return pts;
 }
+//音频流组件打开？
+int audio_stream_componet_open(VideoState *is ,int stream_index)
+{
+    //is是自定义大结构体VideoState，ic是ffmpeg核心结构体AVFormatContext
+    AVFormatContext *ic = is->ic;
+    AVCodecContext *codecCtx;
+    AVCodec *codec;
+    int64_t wanted_channel_layout =0 ;
+    int wanted_nb_channels;
 
+    if(stream_index < 0 || stream_index >= ic->nb_streams){
+        return -1;
+    }
 
+    codecCtx = ic->streams[stream_index]->code;
+    wanted_nb_channels = codecCtx->channels;
 
+    if(!wanted_channel_layout || wanted_nb_channels !=
+            av_get_channel_layout_nb_channels(wanted_channel_layout))
+    {
+        wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
+        //这个与上取反的操作不是很明白?
+        wanted_channel_layout &= ~AV_CH_LAYOUT_STEREO_DOWNMIX;//立体混音
+        //单从代码上来看，意思为：如果左右声道都有才为1
+    }
+    //把设置好的参数保存在大结构体里
+    is->audio_src_fmt = is->audio_tgt_channels = AV_SAMPLE_FMT_S16;
+    is->audio_src_freq = is->audio_tgt_freq = 44100;
+    is->audio_src_channels_layout = is->audio_tgt_channel_layout =wanted_channel_layout;
+    is->audio_src_channels = is->audio_tgt_channels = 2;
 
+    codec = avcodec_find_decoder(codecCtx->codec_id);
+    if(!codec || (avcodec_open2(codecCtx,codec,NULL)<0)) //找不到解码器
+    {
+        fprintf(stderr,"Unsupported codec!\n");
+        return -1;
+    }
+    //这个是抛弃帧数量变量
+    ic->streams[stream_index]->discard = AVDISCARD_DEFAULT;
+    switch (codecCtx->codec_type) { //这个类型应该必须的音频才能打开的，不懂为什么会判断有其他情况
+    case AVMEDIA_TYPE_AUDIO:
+        is->audio_st = ic->streams[stream_index];
+        is->audio_buf_size = 0;
+        is->audio_buf_index = 0;
+        memset(&is->audio_pkt, 0 , sizeof(is->audio_pkt));
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
 
+//核心视频线程
+int video_thread(void *arg)
+{
+    VideoState *is = (VideoState *)arg;
+    AVPacket pkt1, *packet = &pkt1;
 
+    int ret, got_picture,numBytes;
 
+    double video_pts = 0; //当前视频的pts
+    double audio_pts = 0; //音频pts
 
+    //解码视频相关
+    AVFrame *pFrame ,*pFrameRGB;
+    uint8_t *out_buffer_rgb; //解码后的RGB数据
+    struct SwsContext *img_convert_ctx; //用于解码后的格式转换结构体
+    AVCodecContext *pCodecCtx = is->video_st->codec; //视频解码器
+    pFrame = av_frame_alloc();
+    pFrameRGB = av_frame_alloc();
+    //YUV->RGB32
+    //素拉伸的方式SWS_BICUBIC
+//    SWS_BICUBIC性能比较好。
+//    SWS_FAST_BILINEAR在性能和速度之间有一个比好好的平衡。
+//    SWS_POINT的效果比较差。
+    img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height,
+                                     pCodecCtx->pix_fmt, pCodecCtx->width, pCodecCtx->height,
+                                     PIX_FMT_BGR32, SWS_BICUBIC, NULL,NULL,NULL);
+    //根据视频的格式得到一帧的大小
+    numBytes = avpicture_get_size(PIX_FMT_BGR32, pCodecCtx->width, pCodecCtx->height);
 
+    out_buffer_rgb = (uint8_t*) av_malloc(numBytes* sizeof(uint8_t));
+    //根据指定的图像参数和提供的数组设置数据指针和行宽(linesizes). avpicture_fill函数将ptr指向的数据填充到picture内，但并没有拷贝，只是将picture结构内的data指针指向了ptr的数据!
+    avpicture_fill((AVPicture*) pFrameRGB, out_buffer_rgb, PIX_FMT_BGR32, pCodecCtx->width, pCodecCtx->height);
 
+    for(;;)
+    {
+        if(is->quit)
+        {
+            qDebug()<<__FUNCTION__<<"quit!";
+            packet_queue_flush(&is->videoq);
+            break;
+        }
+        if(is->isPause == true)
+        {
+            SDL_Delay(10);
+            continue;
+        }
+        if(packet_queue_get(&is->videoq,packet,0) < 0)
+        {
+            if(is->readFinished)
+            {
+                break;//队列里没有数据了
+            }
+            else{
+                SDL_Delay(1);//队列里暂时没有数据
+                continue;
+            }
+        }
+        //收到这个数据 说明刚刚执行过跳转 现在需要把解码器的数据 清除一下
+        if(strcmp((char*)packet->data, FLUSH_DATA) == 0)
+        {
+            avcodec_flush_buffers(is->video_st->codec);
+            av_free_packet(packet);
+            continue;
+        }
+        //解码一帧
+        ret = avcodec_decode_video2(pCodecCtx, pFrame, &got_picture, packet);
+        if(ret<0)
+        {
+            qDebug()<<"decode error. \n";
+            av_free_packet(packet);
+            continue;
+        }
+        //部分情况下ffmpeg 解码出的帧会没有数据 pts值为AV_NOPTS_VALUE=-9223372036854775808
+        if(packet->dts == AV_NOPTS_VALUE &&pFrame->opaque && *(uint64_t*)pFrame->opaque !=AV_NOPTS_VALUE)
+        {//pFrame->opaque for some private data of the user
+            video_pts = *(uint64_t*)pFrame->opaque;
+        }
+        else if(packet->dts != AV_NOPTS_VALUE)
+        {
+            video_pts = packet->dts;
+        }
+        else
+        {
+            video_pts = 0;
+        }
+        //做音视频同步
+        video_pts *=av_q2d(is->video_st->time_base);
+        video_pts = synchronize_video(is,pFrame,video_pts);
+        //转跳seek了
+        if(is->seek_flag_video)
+        {
+            //发生转跳，则跳过关键帧到目的时间这几帧
+            if(video_pts < is->seek_time)
+            {
+                av_free_packet(packet);
+                continue;
+            }
+            else{
+                is->seek_flag_video = 0;
+            }
+        }
+        while(1)
+        {
+            if(is->quit)
+            {
+                break;
+            }
+            if(is->readFinished && is->audioq.size == 0)
+            {
+                //读取完了 且音频数据也播放完了 就剩下视频数据了  直接显示出来了 不用同步了
+                break;
+            }
+            audio_pts = is->audio_clock;
 
+            video_pts = is->video_clock;
 
+           if(video_pts <= audio_pts) break;
+           int delayTime = (video_pts - audio_pts) * 1000;
+           delayTime = delayTime > 5? 5 :delayTime;
+           if(!is->isNeedPause)
+           {
+               SDL_Delay(delayTime);
+           }
+           //发送展示信号
+           if(got_picture)
+           {
+               //转换
+               sws_scale(img_convert_ctx,
+                         (uint8_t const *const *)pFrame->data,
+                         pFrame->linesize, 0, pCodecCtx->height, pFrameRGB->data,
+                         pFrameRGB->linesize);
+               QImage tmpImg((char*)out_buffer_rgb, pCodecCtx->width,pCodecCtx->height, QImage::Format_RGB32);
+               //好像是字节对齐的函数，第二个参数是设定有没有Alpha通道吧,4*8=32位，我们只用到24位
+               QImage image = tmpImg.convertToFormat(QImage::Format_RGB888,Qt::NoAlpha);
 
-
-
-
-
-
-
-
-
-
-
+               is->player->disPlayVideo(image);//调用激发信号的函数
+               if(is->isNeedPause)
+               {
+                   is->isPause = true;
+                   is->isNeedPause = false;
+               }
+           }
+           av_free_packet(packet);
+        }
+        av_free(pFrame);
+        av_free(pFrameRGB);
+        av_free(out_buffer_rgb);
+        sws_freeContext(img_convert_ctx);
+        if(is->quit){
+            is->quit = true;
+        }
+        is->videoThreadFinished = true;
+        qDebug()<<__FUNCTION__<<"finished!";
+        return 0;
+    }
+}
+//构造函数
 kunplay_thread::kunplay_thread()
 {
+    //安全起见
+    memset(&mVideoState, 0, sizeof(VideoState));//安全起见，初始化内存。
+    mVideoWidget = NULL;
+    mPlayState = Stop;
+
+    mAudioID = 0;
+    mIsMute = 0;
+    mVolume = 1;
 
 }
+
+kunplay_thread::~kunplay_thread()
+{
+    qDebug()<<__FUNCTION__<<"1111.....";
+    //貌似这个mAudioID是执行SDL播放的时候得到的设备ID？
+    if(mAudioID != 0)
+    {
+        SDL_LockAudioDevice(mAudioID);
+        SDL_CloseAudioDevice(mAudioID);
+        SDL_UnlockAudioDevice(mAudioID);
+        mAudioID = 0;
+    }
+    //这个是反初始化，不与AVPacket队列有关
+    deInit();
+
+    QDebug()<<__FUNCTION__<<"222...";
+}
+
+void kunplay_thread::deInit()
+{
+    if(mVideoState.swr_ctx != NULL)
+    {
+        swr_free(&mVideoState.swr_ctx);
+        mVideoState.swr_ctx = NULL;
+    }
+
+    if(mVideoState.audio_frame != NULL)
+    {
+        avcodec_free_frame(&mVideoState.audio_frame);
+        mVideoState.audio_frame = NULL;
+    }
+}
+//设置文件名就启动线程
+bool kunplay_thread::setFileName(QString path)
+{
+    if(mPlayState != Stop)
+    {
+        return false;
+    }
+
+    memset(&mVideoState , 0, sizeof(VideoState));//安全
+    this->start();//启动线程
+}
+
+bool kunplay_thread::replay()
+{
+    while(this->isRunning())
+    {
+        SDL_Delay(5);
+    }
+    if(mPlayState != Stop)
+        return false;
+
+    this->start();
+    return true;
+}
+
+bool kunplay_thread::paly()
+{
+    mVideoState.isNeedPause = false;
+    mVideoState.isPause = false;
+
+    if(mPlayState != Pause)
+    {
+        return false;
+    }
+    mPlayState = playing;
+    emit sig_StateChanged(playing);
+
+    return true;
+}
+
+bool kunplay_thread::stop(bool isWait)
+{
+    qDebug()<<__FUNCTION__<"111.....";
+    if(mPlayState == Stop)
+    {
+        qDebug()<<__FUNCTION__<<"3333";
+        return false;
+    }
+    mPlayerState = Stop;
+        mVideoState.quit = true;
+    qDebug()<<__FUNCTION__<<"222...";
+        if (isWait)
+        {
+            while(!mVideoState.readThreadFinished)
+            {
+    //            qDebug()<<mVideoState.readThreadFinished<<mVideoState.videoThreadFinished;
+                SDL_Delay(3);
+            }
+        }
+    qDebug()<<__FUNCTION__<<"999...";
+
+    //    emit sig_StateChanged(Stop);
+
+        return true;
+}
+
+void kunplay_thread::seek(int64_t pos)
+{
+    if(!mVideoState.seek_req) //seek_req为0进来，应该哪里会置零的，应该是转跳完置零
+    {
+        mVideoState.seek_pos = pos;
+        mVideoState.seek_req = 1;
+    }
+}
+
+void kunplay_thread::setVolume(float value)
+{
+    mVolume = value;
+    mVideoState.mVolume = value;
+}
+
+double kunplay_thread::getCurrentTime()
+{
+    return mVideoState.audio_clock;
+}
+//这应该是获取视频时长
+int64_t VideoPlayer_Thread::getTotalTime()
+{
+    return mVideoState.ic->duration;
+}
+void VideoPlayer_Thread::disPlayVideo(QImage img)
+{
+    emit sig_GetOneFrame(img);  //发送信号
+}
+
+void VideoPlayer_Thread::setVideoWidget(VideoPlayer_ShowVideoWidget*widget)
+{
+    mVideoWidget = widget;
+    //关联信号和槽还能写在这
+    connect(this,SIGNAL(sig_GetOneFrame(QImage)),mVideoWidget,SLOT(slotGetOneFrame(QImage)));
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
