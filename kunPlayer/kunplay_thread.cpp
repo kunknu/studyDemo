@@ -237,7 +237,7 @@ static int audio_decode_frame(VideoState *is,double *pts_ptr)
             if(is->seek_flag_audio)
             {
                //发生了跳转 则跳过关键帧到目的时间的这几帧
-                if(is->audio_clock<is->seek_time){
+                if(is->audio_clock < is->seek_time){
                     break;
                 }
                 else
@@ -341,7 +341,7 @@ void RaiseVolume(char* buf ,int size ,int uRepeat ,double vol)
     }
 }
 
-
+//音频解码并送入SDL缓存中
 static void audio_callback(void *userdata,Uint8 *stream, int len)
 {
     VideoState *is=(VideoState*)userdata;
@@ -445,7 +445,7 @@ static double synchronize_video(VideoState *is,AVFrame *src_frame, double pts)
     return pts;
 }
 //音频流组件打开？
-int audio_stream_componet_open(VideoState *is ,int stream_index)
+int audio_stream_component_open(VideoState *is ,int stream_index)
 {
     //is是自定义大结构体VideoState，ic是ffmpeg核心结构体AVFormatContext
     AVFormatContext *ic = is->ic;
@@ -458,7 +458,7 @@ int audio_stream_componet_open(VideoState *is ,int stream_index)
         return -1;
     }
 
-    codecCtx = ic->streams[stream_index]->code;
+    codecCtx = ic->streams[stream_index]->codec;
     wanted_nb_channels = codecCtx->channels;
 
     if(!wanted_channel_layout || wanted_nb_channels !=
@@ -470,9 +470,9 @@ int audio_stream_componet_open(VideoState *is ,int stream_index)
         //单从代码上来看，意思为：如果左右声道都有才为1
     }
     //把设置好的参数保存在大结构体里
-    is->audio_src_fmt = is->audio_tgt_channels = AV_SAMPLE_FMT_S16;
+    is->audio_src_fmt = is->audio_tgt_fmt = AV_SAMPLE_FMT_S16;
     is->audio_src_freq = is->audio_tgt_freq = 44100;
-    is->audio_src_channels_layout = is->audio_tgt_channel_layout =wanted_channel_layout;
+    is->audio_src_channel_layout = is->audio_tgt_channel_layout =wanted_channel_layout;
     is->audio_src_channels = is->audio_tgt_channels = 2;
 
     codec = avcodec_find_decoder(codecCtx->codec_id);
@@ -627,7 +627,7 @@ int video_thread(void *arg)
                          (uint8_t const *const *)pFrame->data,
                          pFrame->linesize, 0, pCodecCtx->height, pFrameRGB->data,
                          pFrameRGB->linesize);
-               QImage tmpImg((char*)out_buffer_rgb, pCodecCtx->width,pCodecCtx->height, QImage::Format_RGB32);
+               QImage tmpImg((uchar*)out_buffer_rgb, pCodecCtx->width,pCodecCtx->height, QImage::Format_RGB32);
                //好像是字节对齐的函数，第二个参数是设定有没有Alpha通道吧,4*8=32位，我们只用到24位
                QImage image = tmpImg.convertToFormat(QImage::Format_RGB888,Qt::NoAlpha);
 
@@ -680,7 +680,7 @@ kunplay_thread::~kunplay_thread()
     //这个是反初始化，不与AVPacket队列有关
     deInit();
 
-    QDebug()<<__FUNCTION__<<"222...";
+    qDebug()<<__FUNCTION__<<"222...";
 }
 
 void kunplay_thread::deInit()
@@ -745,7 +745,7 @@ bool kunplay_thread::stop(bool isWait)
         qDebug()<<__FUNCTION__<<"3333";
         return false;
     }
-    mPlayerState = Stop;
+    mPlayState = Stop;
         mVideoState.quit = true;
     qDebug()<<__FUNCTION__<<"222...";
         if (isWait)
@@ -783,21 +783,375 @@ double kunplay_thread::getCurrentTime()
     return mVideoState.audio_clock;
 }
 //这应该是获取视频时长
-int64_t VideoPlayer_Thread::getTotalTime()
+int64_t kunplay_thread::getTotalTime()
 {
     return mVideoState.ic->duration;
 }
-void VideoPlayer_Thread::disPlayVideo(QImage img)
+void kunplay_thread::disPlayVideo(QImage img)
 {
     emit sig_GetOneFrame(img);  //发送信号
 }
 
-void VideoPlayer_Thread::setVideoWidget(VideoPlayer_ShowVideoWidget*widget)
+void kunplay_thread::setVideoWidget(kunplay_showvideowight *widget)
 {
     mVideoWidget = widget;
     //关联信号和槽还能写在这
     connect(this,SIGNAL(sig_GetOneFrame(QImage)),mVideoWidget,SLOT(slotGetOneFrame(QImage)));
 }
+
+int kunplay_thread :: openSDL()
+{
+    VideoState *is = &mVideoState;
+    //spec 规格
+    SDL_AudioSpec wanted_spec, spec;
+    int64_t wanted_channel_layout = 0;
+    int wanted_nb_channels = 2;
+    int samplerate = 44100;
+
+    /*  SDL支持的声道数为 1, 2, 4, 6 */
+   //    /*  后面我们会使用这个数组来纠正不支持的声道数目 */
+   //    const int next_nb_channels[] = { 0, 0, 1, 6, 2, 6, 4, 6 };
+    if(!wanted_channel_layout ||
+            wanted_nb_channels != av_get_channel_layout_nb_channels(wanted_nb_channels))
+    {
+        wanted_channel_layout = av_get_default_channel_layout(wanted_nb_channels);
+        wanted_channel_layout &= ~AV_CH_LAYOUT_STEREO_DOWNMIX;
+    }
+    wanted_spec.channels = av_get_channel_layout_nb_channels(wanted_channel_layout);
+    wanted_spec.freq = samplerate;
+    if(wanted_spec.freq <= 0 || wanted_spec.channels <= 0){
+        fprintf(stderr,"Invalid sample rate or channel count!\n");
+        return -1;
+    }
+    wanted_spec.format = AUDIO_S16SYS; // 具体含义请查看“SDL宏定义”部分
+    wanted_spec.silence = 0;             // 0指示静音
+    wanted_spec.samples = SDL_AUDIO_BUFFER_SIZE; // 自定义SDL缓冲区大小
+    wanted_spec.callback = audio_callback; // 音频解码的关键回调函数
+    wanted_spec.userdata = is; // 传给上面回调函数的外带数据
+    //这里是获取音频设备的所有下标，0应该是默认输出设备
+    int num = SDL_GetNumAudioDevices(0);
+    for(int i = 0 ; i<num ; i++){
+        //该变量是类的成员变量, 根据wanted_space规格去找到设备id,space应该也是出参，同为SDL_AudioSpec,space是实际得到的参数
+        mAudioID = SDL_OpenAudioDevice(SDL_GetAudioDeviceName(1,0),false, &wanted_spec,&spec,0);
+        if(mAudioID>0)
+        {//貌似0不是设备的下标，算是一个默认值
+            break;
+        }
+    }
+    /* 检查实际使用的配置（保存在spec,由SDL_OpenAudio()填充） */
+    if(spec.format != AUDIO_S16SYS)
+    {
+        qDebug()<<"SDL advised audio format %d is not supported!"<<spec.format;
+        return -1;
+    }
+    if(spec.channels != wanted_nb_channels){
+        wanted_channel_layout = av_get_default_channel_layout(spec.channels);
+        if(!wanted_channel_layout){
+            fprintf(stderr,"SDL advised channel count %d is not supported!\n",spec.channels);
+            return -1;
+        }
+    }
+    is->audio_hw_buf_size = spec.size;
+    /* 把设置好的参数保存到大结构中 */
+    is->audio_src_fmt = is->audio_tgt_fmt = AV_SAMPLE_FMT_S16;
+    is->audio_src_freq = is->audio_tgt_freq = spec.freq;
+    is->audio_src_channel_layout = is->audio_tgt_channel_layout = wanted_channel_layout;
+    is->audio_src_channels = is->audio_tgt_channels = spec.channels;
+
+    //算是给大结构体里的参数初始化吧
+    is->audio_buf_size = 0;
+    is->audio_buf_index = 0;
+    memset(&is->audio_pkt, 0 , sizeof(is->audio_pkt));
+    return 0;
+}
+
+void kunplay_thread::closeSDL()
+{
+    if (mAudioID > 0)
+    {
+        SDL_CloseAudioDevice(mAudioID);
+    }
+
+    mAudioID = -1;
+}
+
+
+void kunplay_thread::run()
+{
+    char file_path[1280] = {0};
+    strcpy(file_path, mFileName.toUtf8().data());
+    //初始化大结构体，成员变量不是指针，已经分配内存空间
+    memset(&mVideoState,0 ,sizeof(VideoState));
+
+    mVideoState.isMute = mIsMute;
+    mVideoState.mVolume = mVolume;
+
+    VideoState *is = &mVideoState;
+
+    AVFormatContext *pFormatCtx;
+    AVCodecContext *pCodecCtx;
+    AVCodec *pCodec;
+
+    AVCodecContext *aCodecCtx;
+    AVCodec *aCodec;
+    int audioStream, videoStream, i;
+
+    //Allocate an AVFormatContext.
+    pFormatCtx = avformat_alloc_context();
+    //打开视频
+    if(avformat_open_input(&pFormatCtx, file_path, NULL, NULL)!=0){
+        printf("can't open file.\n");
+        return ;
+    }
+    if(avformat_find_stream_info(pFormatCtx,NULL)<0){
+        printf("could't find stream infomation.\n");
+        return ;
+    }
+    //成员变量的音视频下标
+    videoStream = -1;
+    audioStream = -1;
+
+    for(i = 0; i<pFormatCtx->nb_streams ; i++){
+        if(pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO){
+            videoStream = i;
+        }
+        if(pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO){
+            audioStream = i;
+        }
+    }
+
+    ///如果videoStream为-1 说明没有找到视频流
+    if (videoStream == -1) {
+        printf("Didn't find a video stream.\n");
+        return;
+    }
+
+    if (audioStream == -1) {
+        printf("Didn't find a audio stream.\n");
+        return;
+    }
+    //赋值给大结构体
+    is->ic = pFormatCtx;
+    is->videoStream = videoStream;
+    is->audioStream = audioStream;
+
+    emit sig_TotalTimeChanged(getTotalTime());
+
+    if(audioStream >= 0){
+        /* 所有设置SDL音频流信息的步骤都在这个函数里完成 */
+        audio_stream_component_open(&mVideoState, audioStream);
+    }
+    ///查找音频解码器
+    aCodecCtx = pFormatCtx->streams[audioStream]->codec;
+    aCodec = avcodec_find_decoder(aCodecCtx->codec_id);
+
+    if (aCodec == NULL) {
+        printf("ACodec not found.\n");
+        return;
+    }
+
+    ///打开音频解码器
+    if (avcodec_open2(aCodecCtx, aCodec, NULL) < 0) {
+        printf("Could not open audio codec.\n");
+        return;
+    }
+
+    is->audio_st = pFormatCtx->streams[audioStream];
+
+    ///查找视频解码器
+    pCodecCtx = pFormatCtx->streams[videoStream]->codec;
+    pCodec = avcodec_find_decoder(pCodecCtx->codec_id);
+
+    if (pCodec == NULL) {
+        printf("PCodec not found.\n");
+        return;
+    }
+
+    ///打开视频解码器
+    if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0) {
+        printf("Could not open video codec.\n");
+        return;
+    }
+    //这里保存了视频流,初始化了这个指针，视频解码和音画同步都会用到这个参数
+    is->video_st = pFormatCtx->streams[videoStream];
+
+    //这个队列结构体不是指针，里面具体的变量由ffmpeg的函数赋内存
+    packet_queue_init(&mVideoState.videoq);
+    packet_queue_init(&mVideoState.audioq);
+
+    ///创建一个线程专门用来解码视频
+    is->video_tid = SDL_CreateThread(video_thread, "video_thread", &mVideoState);
+
+    //这个指针不知道是用来干嘛的，前面用来调用this的信号函数
+    is->player = this;
+
+    AVPacket *packet = (AVPacket *) malloc(sizeof(AVPacket));
+
+    av_dump_format(pFormatCtx, 0, file_path, 0); //输出视频信息
+
+    qDebug()<<__FUNCTION__<<is->quit;
+    mPlayState = playing;
+
+    emit sig_StateChanged(playing);
+    //初始化SDL的参数
+    openSDL();
+
+    SDL_LockAudioDevice(mAudioID);
+    SDL_PauseAudioDevice(mAudioID,0);
+    SDL_UnlockAudioDevice(mAudioID);
+
+    while(1)
+    {
+        if (is->quit)
+        {
+            //停止播放了
+            break;
+        }
+        //转跳
+        if(is->seek_req)
+        {
+            int stream_index = -1;
+            int64_t seek_target = is->seek_pos;
+
+            if(is->videoStream >= 0)
+                stream_index = is->videoStream;
+            else if(is->audioStream >= 0)
+                stream_index = is->audioStream;
+            AVRational aVRational = {1,AV_TIME_BASE};
+            if(stream_index >= 0)
+            {
+                //time_base转换函数av_rescale_q
+                seek_target = av_rescale_q(seek_target,aVRational,pFormatCtx->streams[stream_index]->time_base);
+            }
+
+            if(av_seek_frame(is->ic,stream_index, seek_target,AVSEEK_FLAG_BACKWARD)<0){
+                fprintf(stderr, "%s: error while seeking\n",is->ic->filename);
+            }else{
+                if(is->audioStream >= 0){
+                    AVPacket *packet = (AVPacket *)malloc(sizeof (AVPacket));
+                    av_new_packet(packet, 10);
+                    strcpy((char*)packet->data,FLUSH_DATA);
+                    packet_queue_flush(&is->audioq); //清除队列
+                    packet_queue_put(&is->audioq, packet); //往队列中存入用来清除的包
+                }
+                if(is->videoStream >= 0){
+                    AVPacket *packet = (AVPacket *) malloc(sizeof(AVPacket)); //分配一个packet
+                    av_new_packet(packet, 10);
+                    strcpy((char*)packet->data,FLUSH_DATA);
+                    packet_queue_flush(&is->videoq); //清除队列
+                    packet_queue_put(&is->videoq, packet); //往队列中存入用来清除的包
+                    is->video_clock = 0;
+                }
+            }
+            //置零
+            is->seek_req = 0;
+            is->seek_time = is->seek_pos / 1000000.0;//是微妙转换成秒吗?
+            is->seek_flag_audio = 1;//这两个标志位忘记在哪用的了
+            is->seek_flag_video = 1;
+
+            if (is->isPause)
+            {
+                is->isNeedPause = true;
+                is->isPause = false;
+            }
+        }
+
+        //这里做了个限制  当队列里面的数据超过某个大小的时候 就暂停读取  防止一下子就把视频读完了，导致的空间分配不足
+        /* 这里audioq.size是指队列中的所有数据包带的音频数据的总量或者视频数据总量，并不是包的数量 */
+        //这个值可以稍微写大一些
+        //        qDebug()<<__FUNCTION__<<is->audioq.size<<MAX_AUDIO_SIZE<<is->videoq.size<<MAX_VIDEO_SIZE;
+        if (is->audioq.size > MAX_AUDIO_SIZE || is->videoq.size > MAX_VIDEO_SIZE) {//队列里缓存的最大数据大小
+            SDL_Delay(10);
+            continue;
+        }
+        //        qDebug()<<__FUNCTION__<<"is->isPause"<<is->isPause;
+
+        if (is->isPause == true)
+        {
+            SDL_Delay(10);
+            continue;
+        }
+
+        if (av_read_frame(pFormatCtx, packet) < 0)//这里是读文件流成一帧
+        {
+            is->readFinished = true;
+
+//            qDebug()<<__FUNCTION__<<"av_read_frame<0";
+
+            if (is->quit)
+            {
+                break; //解码线程也执行完了 可以退出了
+            }
+
+            SDL_Delay(10);
+            continue;
+        }
+        if (packet->stream_index == videoStream)
+        {
+            packet_queue_put(&is->videoq, packet);
+            //这里我们将数据存入队列 因此不调用 av_free_packet 释放
+        }
+        else if( packet->stream_index == audioStream )
+        {
+            packet_queue_put(&is->audioq, packet);
+            //这里我们将数据存入队列 因此不调用 av_free_packet 释放
+        }
+        else
+        {
+            // Free the packet that was allocated by av_read_frame
+            av_free_packet(packet);
+        }
+    }
+    qDebug()<<__FUNCTION__<<"333";
+
+    ///文件读取结束 跳出循环的情况
+    ///等待播放完毕
+    while (!is->quit) {
+        SDL_Delay(100);
+    }
+    qDebug()<<__FUNCTION__<<"555";
+
+    avcodec_close(aCodecCtx);
+    avcodec_close(pCodecCtx);
+    avformat_close_input(&pFormatCtx);
+    avformat_free_context(pFormatCtx);
+
+    free(packet);
+
+    packet_queue_deinit(&mVideoState.videoq);
+    packet_queue_deinit(&mVideoState.audioq);
+
+    is->readThreadFinished = true;
+
+    emit sig_StateChanged(Stop);
+
+    qDebug()<<__FUNCTION__<<"finished!";
+
+    return ;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

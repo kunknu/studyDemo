@@ -36,7 +36,7 @@ typedef struct PacketQueue {
 #define AVCODEC_MAX_AUDIO_FRAME_SIZE 192000
 
 #define MAX_VIDEO_SIZE (25*256*1024)
-#define MAX_AUDIO_SIZE (25*16*1024)
+#define MAX_AUDIO_SIZE (25*16*1024) //队列里缓存的最大数据大小
 
 class kunplay_thread; //前置声明
 
@@ -74,7 +74,7 @@ typedef struct VideoState
     double video_clock;
 
     AVStream *video_st;
-    PacketQueue vediosq;
+    PacketQueue videoq;
 
     //跳转相关变量
     int seek_req;
@@ -119,7 +119,9 @@ public:
     bool replay();//重新播放
     bool paly();
     bool pause();
-    bool stop(bool isMute){mIsMute =isMute;}
+    bool stop(bool isWait = false); //参数表示是否等待所有的线程执行完毕再返回
+    void seek(int64_t pos); //单位是微秒
+    void setMute(bool isMute){mIsMute = isMute;}
     void setVolume(float value);
 
     int64_t getTotalTime();//单位微妙
@@ -135,8 +137,11 @@ signals:
 
     void sig_StateChanged(kunplay_thread::PlayState state);
     void sig_TotalTimeChanged(qint64 uSec);//获取到视频时长就激发此信号
-
 protected:
+    void run() override;
+
+
+private:
     QString mFileName;
     VideoState mVideoState;
     PlayState mPlayState;//播放状态
