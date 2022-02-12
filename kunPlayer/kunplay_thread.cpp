@@ -722,7 +722,7 @@ bool kunplay_thread::replay()
     return true;
 }
 
-bool kunplay_thread::paly()
+bool kunplay_thread::play()
 {
     mVideoState.isNeedPause = false;
     mVideoState.isPause = false;
@@ -739,7 +739,7 @@ bool kunplay_thread::paly()
 
 bool kunplay_thread::stop(bool isWait)
 {
-    qDebug()<<__FUNCTION__<"111.....";
+    qDebug()<<__FUNCTION__<<"111.....";
     if(mPlayState == Stop)
     {
         qDebug()<<__FUNCTION__<<"3333";
@@ -874,7 +874,21 @@ void kunplay_thread::closeSDL()
 
     mAudioID = -1;
 }
+bool kunplay_thread::pause()
+{
+    mVideoState.isPause = true;
 
+    if (mPlayState != playing)
+    {
+        return false;
+    }
+
+    mPlayState = Pause;
+
+    emit sig_StateChanged(Pause);
+
+    return true;
+}
 
 void kunplay_thread::run()
 {

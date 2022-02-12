@@ -38,7 +38,7 @@ private:
     Ui::Widget *ui;
 
     kunplay_thread *mplayer; //播放线程
-    QTimer *mTime; //定时器-获取当前视频时间
+    QTimer *mTimer; //定时器-获取当前视频时间
 
 private slots:
     ///播放器相关的槽函数

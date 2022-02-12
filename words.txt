@@ -1,0 +1,9 @@
+音视频：
+
+units	单位，用在nalu_units；
+
+extract	提取;提炼;索取；出现在ff_hevc_exract_rbsp()
+
+
+
+通用：

@@ -117,7 +117,7 @@ public:
 
     bool setFileName(QString path);
     bool replay();//重新播放
-    bool paly();
+    bool play();
     bool pause();
     bool stop(bool isWait = false); //参数表示是否等待所有的线程执行完毕再返回
     void seek(int64_t pos); //单位是微秒
