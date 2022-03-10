@@ -1,19 +1,27 @@
 音视频：
 
-units	单位，用在nalu_units；
+units		单位，用在nalu_units；
 
-extract	提取;提炼;索取；出现在ff_hevc_exract_rbsp()
+extract		提取;提炼;索取；出现在ff_hevc_exract_rbsp()
 
 hardware accelerators	硬件加速器；
 
-Rational	合理的;理性的;明智的;理智的;清醒的；AVRation分数
+Rational		合理的;理性的;明智的;理智的;清醒的；AVRation分数
 
-destruct	故意或有计划的破坏；
+destruct		故意或有计划的破坏；
+internal		内部的;里面的;体内的;
+Integration	整合；
 
+compressed	(空气或气体)压缩的
+
+
+-------------------------------------------------------------------------------------------------------------
 通用：
 
-dump	倾倒;抛弃;(尤指在不合适的地方)丢弃;扔掉;丢下;推卸
+dump		倾倒;抛弃;(尤指在不合适的地方)丢弃;扔掉;丢下;推卸
 
-convert	转换;(使)转变;转化;可转变为;可变换成;
+convert		转换;(使)转变;转化;可转变为;可变换成;
 
-probe	探查;探究;盘问;追问;
+probe		探查;探究;盘问;追问;
+
+partition		隔断；
